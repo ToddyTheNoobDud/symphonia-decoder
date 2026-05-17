@@ -1,11 +1,11 @@
 {
-  "name": "@napi-rs/package-template",
-  "version": "1.0.0",
-  "description": "Template project for writing node package with napi-rs",
+  "name": "@toddynnn/symphonia-decoder",
+  "version": "1.0.7",
+  "description": "NAPI wrapper for Symphonia audio decoder, made exclusive for Nodelink, but can be used elsewhere.",
   "main": "index.js",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/napi-rs/package-template.git"
+    "url": "git+ssh://git@github.com/ToddyTheNoobDud/symphonia-decoder.git"
   },
   "license": "MIT",
   "browser": "browser.js",
@@ -23,7 +23,7 @@
     "browser.js"
   ],
   "napi": {
-    "binaryName": "package-template",
+    "binaryName": "toddy-decoder",
     "targets": [
       "x86_64-pc-windows-msvc",
       "x86_64-apple-darwin",
@@ -65,21 +65,21 @@
     "prepare": "husky"
   },
   "devDependencies": {
-    "@emnapi/core": "^1.5.0",
-    "@emnapi/runtime": "^1.5.0",
-    "@napi-rs/cli": "^3.2.0",
+    "@emnapi/core": "^1.10.0",
+    "@emnapi/runtime": "^1.10.0",
+    "@napi-rs/cli": "^3.6.2",
     "@oxc-node/core": "^0.1.0",
     "@taplo/cli": "^0.7.0",
-    "@tybys/wasm-util": "^0.10.0",
+    "@tybys/wasm-util": "^0.10.2",
     "ava": "^8.0.0",
     "chalk": "^5.6.2",
     "husky": "^9.1.7",
-    "lint-staged": "^17.0.0",
+    "lint-staged": "^17.0.5",
     "npm-run-all2": "^8.0.4",
-    "oxlint": "^1.14.0",
-    "prettier": "^3.6.2",
-    "tinybench": "^6.0.0",
-    "typescript": "^6.0.0"
+    "oxlint": "^1.65.0",
+    "prettier": "^3.8.3",
+    "tinybench": "^6.0.2",
+    "typescript": "^6.0.3"
   },
   "lint-staged": {
     "*.@(js|ts|tsx)": [
