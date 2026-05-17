@@ -1,6 +1,6 @@
 {
   "name": "@toddynnn/symphonia-decoder",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "NAPI wrapper for Symphonia audio decoder, made exclusive for Nodelink, but can be used elsewhere.",
   "main": "index.js",
   "repository": {
