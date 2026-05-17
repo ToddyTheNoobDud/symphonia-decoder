@@ -1,6 +1,6 @@
 import test from 'ava'
 
-import { SymphoniaDecoder } from '../index'
+import { SymphoniaDecoder } from '../index.js'
 
 test('SymphoniaDecoder can be instantiated', (t) => {
   const decoder = new SymphoniaDecoder()
