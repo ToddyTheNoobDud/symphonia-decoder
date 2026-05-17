@@ -214,7 +214,7 @@ impl RingBuf {
 fn process_resampler_chunk(
   resampler: &mut Fft<f32>,
   input: &[Vec<f32>],
-  out_buf: &mut Vec<Vec<f32>>,
+  out_buf: &mut [Vec<f32>],
   output: &mut Vec<i16>,
   channels: usize,
   chunk_size: usize,
@@ -239,10 +239,8 @@ fn process_resampler_chunk(
     .map_err(|e| Error::from_reason(format!("Resampler: {e}")))?;
 
   for f in 0..frames {
-    for ch in 0..channels {
-      output.push(helpers::f32_to_i16(
-        out_buf[ch].get(f).copied().unwrap_or(0.0),
-      ));
+    for ch_buf in out_buf.iter().take(channels) {
+      output.push(helpers::f32_to_i16(ch_buf.get(f).copied().unwrap_or(0.0)));
     }
   }
 
@@ -253,7 +251,7 @@ fn flush_resampler_tail(
   resampler: &mut Fft<f32>,
   accum: &mut [RingBuf],
   resampler_in: &mut [Vec<f32>],
-  out_buf: &mut Vec<Vec<f32>>,
+  out_buf: &mut [Vec<f32>],
   output: &mut Vec<i16>,
   channels: usize,
   chunk_size: usize,
@@ -337,6 +335,12 @@ pub struct SymphoniaDecoder {
   final_output_buffer: Vec<i16>,
 }
 
+impl Default for SymphoniaDecoder {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 #[napi]
 impl SymphoniaDecoder {
   #[napi(constructor)]
@@ -407,10 +411,10 @@ impl SymphoniaDecoder {
     let mss = MediaSourceStream::new(Box::new(source), Default::default());
 
     let mut hint = Hint::new();
-    if let Some(ext) = codec_registry_hint {
-      if !ext.is_empty() {
-        hint.with_extension(&ext);
-      }
+    if let Some(ext) = codec_registry_hint
+      && !ext.is_empty()
+    {
+      hint.with_extension(&ext);
     }
 
     let reader = symphonia::default::get_probe()
@@ -497,30 +501,28 @@ impl SymphoniaDecoder {
     self.final_output_buffer.clear();
 
     loop {
-      if needs_resample {
-        if let Some(ref mut rs) = self.resampler {
-          while self.input_accumulator[0].len() >= chunk_size {
-            for ch in 0..target_channels {
-              self.resampler_in[ch].resize(chunk_size, 0.0);
-              let n = self.input_accumulator[ch].drain_to(&mut self.resampler_in[ch]);
-              debug_assert_eq!(n, chunk_size);
-            }
-            process_resampler_chunk(
-              rs,
-              &self.resampler_in,
-              &mut self.resampler_out,
-              &mut self.final_output_buffer,
-              target_channels,
-              chunk_size,
-              None,
-            )?;
-            if self.final_output_buffer.len() >= max_samples {
-              break;
-            }
+      if needs_resample && let Some(ref mut rs) = self.resampler {
+        while self.input_accumulator[0].len() >= chunk_size {
+          for ch in 0..target_channels {
+            self.resampler_in[ch].resize(chunk_size, 0.0);
+            let n = self.input_accumulator[ch].drain_to(&mut self.resampler_in[ch]);
+            debug_assert_eq!(n, chunk_size);
           }
+          process_resampler_chunk(
+            rs,
+            &self.resampler_in,
+            &mut self.resampler_out,
+            &mut self.final_output_buffer,
+            target_channels,
+            chunk_size,
+            None,
+          )?;
           if self.final_output_buffer.len() >= max_samples {
             break;
           }
+        }
+        if self.final_output_buffer.len() >= max_samples {
+          break;
         }
       }
 
