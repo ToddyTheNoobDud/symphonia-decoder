@@ -2,10 +2,11 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-use std::io::Cursor;
+use std::collections::VecDeque;
 use std::io::ErrorKind;
-use std::mem;
+use std::io::{Error as IoError, Read, Seek, SeekFrom};
 use std::slice;
+use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -25,39 +26,180 @@ use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 
 const SAMPLE_MAX: f32 = 32767.0;
+const INITIAL_BUFFER_CAPACITY: usize = 1024 * 1024;
+const PROBE_THRESHOLD: usize = 1024;
+const STREAM_DECODE_THRESHOLD: usize = 1024 * 1024;
 const RESAMPLE_CHUNK_SIZE: usize = 4096;
 const MAX_OUTPUT_FRAMES: usize = 4096;
 
-struct OwnedSource {
-  data: Cursor<Vec<u8>>,
+#[derive(Default)]
+struct BufferState {
+  data: VecDeque<u8>,
+  eos: bool,
+  probe_cursor: usize,
+  committed: bool,
 }
 
-impl OwnedSource {
-  fn new(data: Vec<u8>) -> Self {
+#[derive(Clone)]
+struct SharedBuffer {
+  state: Arc<Mutex<BufferState>>,
+}
+
+impl SharedBuffer {
+  fn new() -> Self {
     Self {
-      data: Cursor::new(data),
+      state: Arc::new(Mutex::new(BufferState {
+        data: VecDeque::with_capacity(INITIAL_BUFFER_CAPACITY),
+        eos: false,
+        probe_cursor: 0,
+        committed: false,
+      })),
+    }
+  }
+
+  fn push(&self, bytes: &[u8]) {
+    self.state.lock().unwrap().data.extend(bytes);
+  }
+
+  fn close(&self) {
+    self.state.lock().unwrap().eos = true;
+  }
+
+  fn clear(&self) {
+    let mut state = self.state.lock().unwrap();
+    state.data.clear();
+    state.eos = false;
+    state.probe_cursor = 0;
+    state.committed = false;
+  }
+
+  fn start_probe(&self) {
+    let mut state = self.state.lock().unwrap();
+    state.committed = false;
+    state.probe_cursor = 0;
+  }
+
+  fn reset_probe(&self) {
+    self.state.lock().unwrap().probe_cursor = 0;
+  }
+
+  fn commit_probe(&self) {
+    let mut state = self.state.lock().unwrap();
+    if state.committed {
+      return;
+    }
+    let drain = state.probe_cursor.min(state.data.len());
+    if drain > 0 {
+      state.data.drain(..drain);
+    }
+    state.probe_cursor = 0;
+    state.committed = true;
+  }
+
+  fn available_bytes(&self) -> usize {
+    let state = self.state.lock().unwrap();
+    if state.committed {
+      state.data.len()
+    } else {
+      state.data.len().saturating_sub(state.probe_cursor)
+    }
+  }
+
+  fn is_closed(&self) -> bool {
+    self.state.lock().unwrap().eos
+  }
+}
+
+struct StreamingSource {
+  buffer: SharedBuffer,
+}
+
+impl StreamingSource {
+  fn copy_from_deque_at(deque: &VecDeque<u8>, start: usize, dst: &mut [u8]) -> usize {
+    if start >= deque.len() || dst.is_empty() {
+      return 0;
+    }
+
+    let (front, back) = deque.as_slices();
+    let total = front.len() + back.len();
+    let max_copy = dst.len().min(total - start);
+
+    if start < front.len() {
+      let front_offset = start;
+      let front_available = front.len() - front_offset;
+      let front_copy = max_copy.min(front_available);
+      dst[..front_copy].copy_from_slice(&front[front_offset..front_offset + front_copy]);
+
+      let remaining = max_copy - front_copy;
+      if remaining > 0 {
+        dst[front_copy..front_copy + remaining].copy_from_slice(&back[..remaining]);
+      }
+      max_copy
+    } else {
+      let back_offset = start - front.len();
+      let back_available = back.len().saturating_sub(back_offset);
+      let back_copy = max_copy.min(back_available);
+      dst[..back_copy].copy_from_slice(&back[back_offset..back_offset + back_copy]);
+      back_copy
     }
   }
 }
 
-impl std::io::Read for OwnedSource {
+impl Read for StreamingSource {
   fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-    self.data.read(buf)
+    let mut state = self.buffer.state.lock().unwrap();
+
+    if state.committed {
+      if state.data.is_empty() {
+        return if state.eos {
+          Ok(0)
+        } else {
+          Err(IoError::new(ErrorKind::WouldBlock, "need more data"))
+        };
+      }
+
+      let (front, back) = state.data.as_slices();
+      let to_copy = buf.len().min(front.len() + back.len());
+      let front_copy = to_copy.min(front.len());
+
+      buf[..front_copy].copy_from_slice(&front[..front_copy]);
+      if front_copy < to_copy {
+        buf[front_copy..to_copy].copy_from_slice(&back[..to_copy - front_copy]);
+      }
+
+      state.data.drain(..to_copy);
+      Ok(to_copy)
+    } else {
+      let available = state.data.len().saturating_sub(state.probe_cursor);
+      if available == 0 {
+        return if state.eos {
+          Ok(0)
+        } else {
+          Err(IoError::new(ErrorKind::WouldBlock, "need more data"))
+        };
+      }
+
+      let to_copy = buf.len().min(available);
+      let copied = Self::copy_from_deque_at(&state.data, state.probe_cursor, &mut buf[..to_copy]);
+      state.probe_cursor += copied;
+      Ok(copied)
+    }
   }
 }
 
-impl std::io::Seek for OwnedSource {
-  fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-    self.data.seek(pos)
+impl Seek for StreamingSource {
+  fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+    Err(IoError::new(ErrorKind::Unsupported, "seek not supported"))
   }
 }
 
-impl MediaSource for OwnedSource {
+impl MediaSource for StreamingSource {
   fn is_seekable(&self) -> bool {
-    true
+    false
   }
+
   fn byte_len(&self) -> Option<u64> {
-    Some(self.data.get_ref().len() as u64)
+    None
   }
 }
 
@@ -88,14 +230,24 @@ mod helpers {
         } else {
           l
         };
-        for i in 0..frames {
-          let lv = l.get(i).map(|&s| $to_f32(s)).unwrap_or(0.0);
-          let rv = r.get(i).map(|&s| $to_f32(s)).unwrap_or(0.0);
-          if target_channels >= 1 {
-            out.push(f32_to_i16(lv));
+        if target_channels == 2 {
+          let frames_to_process = frames.min(l.len()).min(r.len());
+          let l_slice = &l[..frames_to_process];
+          let r_slice = &r[..frames_to_process];
+          for (&ls, &rs) in l_slice.iter().zip(r_slice.iter()) {
+            out.push(f32_to_i16($to_f32(ls)));
+            out.push(f32_to_i16($to_f32(rs)));
           }
-          if target_channels >= 2 {
-            out.push(f32_to_i16(rv));
+        } else {
+          for i in 0..frames {
+            let lv = l.get(i).map(|&s| $to_f32(s)).unwrap_or(0.0);
+            let rv = r.get(i).map(|&s| $to_f32(s)).unwrap_or(0.0);
+            if target_channels >= 1 {
+              out.push(f32_to_i16(lv));
+            }
+            if target_channels >= 2 {
+              out.push(f32_to_i16(rv));
+            }
           }
         }
       }};
@@ -132,14 +284,24 @@ mod helpers {
         } else {
           l
         };
-        for i in 0..frames {
-          let lv = l.get(i).map(|&s| $to_f32(s)).unwrap_or(0.0);
-          let rv = r.get(i).map(|&s| $to_f32(s)).unwrap_or(0.0);
-          if target_channels >= 1 {
-            accum[0].push(lv);
+        if target_channels == 2 && accum.len() >= 2 {
+          let frames_to_process = frames.min(l.len()).min(r.len());
+          let l_slice = &l[..frames_to_process];
+          let r_slice = &r[..frames_to_process];
+          for (&ls, &rs) in l_slice.iter().zip(r_slice.iter()) {
+            accum[0].push($to_f32(ls));
+            accum[1].push($to_f32(rs));
           }
-          if target_channels >= 2 && accum.len() >= 2 {
-            accum[1].push(rv);
+        } else {
+          for i in 0..frames {
+            let lv = l.get(i).map(|&s| $to_f32(s)).unwrap_or(0.0);
+            let rv = r.get(i).map(|&s| $to_f32(s)).unwrap_or(0.0);
+            if target_channels >= 1 {
+              accum[0].push(lv);
+            }
+            if target_channels >= 2 && accum.len() >= 2 {
+              accum[1].push(rv);
+            }
           }
         }
       }};
@@ -300,22 +462,18 @@ pub struct DecodeResult {
   pub channels: u32,
 }
 
-/// FLAC (and many other seekable formats) requires random access — symphonia's
-/// format reader seeks backward to read STREAMINFO, SEEKTABLE, and frame-sync
-/// points. Feeding it a live-growing buffer causes seek-out-of-bounds errors
-/// mid-stream that silently stop output. By accumulating the full file and
-/// creating a `Cursor<Vec<u8>>` source at probe time, all seeks succeed.
+/// Streaming Symphonia decoder.
 ///
 /// Lifecycle
-/// 1. `push(chunk)` — accumulate compressed data.
-/// 2. `closeInput()` — signal end of input.
-/// 3. `initialize(hint?)` — probe the format (requires `closeInput()` first).
-/// 4. `decode()` in a loop until it returns `null`.
-/// 5. `free()` — release resources.
+/// 1. `push(chunk)` feeds compressed data.
+/// 2. `initialize(hint?)` probes once enough header/metadata is available.
+/// 3. `decode()` returns PCM when a full packet is available, or `null` when
+///    more compressed input is needed.
+/// 4. `closeInput()` signals end-of-input so the final packet/tail can flush.
+/// 5. `free()` releases resources.
 #[napi]
 pub struct SymphoniaDecoder {
-  buffer: Vec<u8>,
-  input_closed: bool,
+  buffer: SharedBuffer,
 
   format_reader: Option<Box<dyn FormatReader>>,
   audio_decoder: Option<Box<dyn AudioDecoder>>,
@@ -347,8 +505,7 @@ impl SymphoniaDecoder {
   pub fn new() -> Self {
     let target_channels = 2usize;
     Self {
-      buffer: Vec::with_capacity(65_536),
-      input_closed: false,
+      buffer: SharedBuffer::new(),
       format_reader: None,
       audio_decoder: None,
       track_id: None,
@@ -371,21 +528,20 @@ impl SymphoniaDecoder {
 
   #[napi]
   pub fn push(&mut self, chunk: Buffer) -> Result<()> {
-    self.buffer.extend_from_slice(chunk.as_ref());
+    self.buffer.push(chunk.as_ref());
     Ok(())
   }
 
   #[napi]
   pub fn close_input(&mut self) -> Result<()> {
-    self.input_closed = true;
+    self.buffer.close();
     Ok(())
   }
 
-  /// Returns the number of bytes still in the pre-probe accumulation buffer.
-  /// This is 0 after `initialize()` because the buffer is moved into the reader.
+  /// Returns the number of compressed bytes currently available to the reader.
   #[napi(getter)]
   pub fn buffered_bytes(&self) -> u32 {
-    self.buffer.len() as u32
+    self.buffer.available_bytes() as u32
   }
 
   #[napi(getter)]
@@ -393,8 +549,7 @@ impl SymphoniaDecoder {
     self.is_probed
   }
 
-  /// Probe the format and set up the decoder.
-  /// Requires `closeInput()` to have been called first.
+  /// Probe the format and set up the decoder when enough input is available.
   /// `codec_registry_hint` is an optional file extension (e.g. `"flac"`, `"mp3"`)
   /// that speeds up probing; pass `null` to auto-detect.
   #[napi]
@@ -402,13 +557,18 @@ impl SymphoniaDecoder {
     if self.is_probed {
       return Ok(true);
     }
-    if !self.input_closed || self.buffer.is_empty() {
+    if !self.buffer.is_closed() && self.buffer.available_bytes() < PROBE_THRESHOLD {
       return Ok(false);
     }
 
-    let file_data = mem::take(&mut self.buffer);
-    let source = OwnedSource::new(file_data);
-    let mss = MediaSourceStream::new(Box::new(source), Default::default());
+    self.buffer.start_probe();
+
+    let mss = MediaSourceStream::new(
+      Box::new(StreamingSource {
+        buffer: self.buffer.clone(),
+      }),
+      Default::default(),
+    );
 
     let mut hint = Hint::new();
     if let Some(ext) = codec_registry_hint
@@ -417,14 +577,25 @@ impl SymphoniaDecoder {
       hint.with_extension(&ext);
     }
 
-    let reader = symphonia::default::get_probe()
-      .probe(
-        &hint,
-        mss,
-        FormatOptions::default(),
-        MetadataOptions::default(),
-      )
-      .map_err(|e| Error::from_reason(format!("Probe failed: {e}")))?;
+    let reader = match symphonia::default::get_probe().probe(
+      &hint,
+      mss,
+      FormatOptions::default(),
+      MetadataOptions::default(),
+    ) {
+      Ok(reader) => reader,
+      Err(SymphoniaError::IoError(e))
+        if !self.buffer.is_closed()
+          && (e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::UnexpectedEof) =>
+      {
+        self.buffer.reset_probe();
+        return Ok(false);
+      }
+      Err(e) => {
+        self.buffer.reset_probe();
+        return Err(Error::from_reason(format!("Probe failed: {e}")));
+      }
+    };
 
     let track_info = reader
       .tracks()
@@ -447,8 +618,8 @@ impl SymphoniaDecoder {
     let source_rate = audio_params.sample_rate.unwrap_or(self.target_rate);
     if source_rate != self.target_rate {
       let resampler = Fft::<f32>::new(
-        self.target_rate as usize, // output sample rate
         source_rate as usize,      // input sample rate
+        self.target_rate as usize, // output sample rate
         self.resample_chunk_size,  // input chunk size (FixedSync::Input)
         1,                         // sub_chunks quality factor
         self.target_channels,      // output channels
@@ -471,6 +642,7 @@ impl SymphoniaDecoder {
     self.track_id = Some(id);
     self.audio_decoder = Some(decoder);
     self.format_reader = Some(reader);
+    self.buffer.commit_probe();
     self.is_probed = true;
     Ok(true)
   }
@@ -526,6 +698,10 @@ impl SymphoniaDecoder {
         }
       }
 
+      if !self.buffer.is_closed() && self.buffer.available_bytes() < STREAM_DECODE_THRESHOLD {
+        break;
+      }
+
       match reader.next_packet() {
         Ok(Some(packet)) => {
           if packet.track_id != track_id {
@@ -574,6 +750,10 @@ impl SymphoniaDecoder {
         Err(SymphoniaError::IoError(e))
           if e.kind() == ErrorKind::UnexpectedEof || e.kind() == ErrorKind::WouldBlock =>
         {
+          if !self.buffer.is_closed() {
+            break;
+          }
+
           self.exhausted = true;
           if let Some(ref mut rs) = self.resampler {
             flush_resampler_tail(
@@ -611,7 +791,6 @@ impl SymphoniaDecoder {
   #[napi]
   pub fn flush(&mut self) -> Result<()> {
     self.buffer.clear();
-    self.input_closed = false;
     self.exhausted = false;
     self.format_reader = None;
     self.audio_decoder = None;
@@ -631,21 +810,16 @@ impl SymphoniaDecoder {
 
   #[napi]
   pub fn free(&mut self) {
-    self.buffer = Vec::new();
-    self.input_closed = false;
+    self.buffer.clear();
     self.exhausted = false;
     self.format_reader = None;
     self.audio_decoder = None;
     self.resampler = None;
     self.track_id = None;
     self.is_probed = false;
-    for ch in &mut self.input_accumulator {
-      ch.clear();
-    }
-    for ch in &mut self.resampler_in {
-      ch.clear();
-    }
-    self.resampler_out.clear();
-    self.final_output_buffer.clear();
+    self.input_accumulator = Vec::new();
+    self.resampler_in = Vec::new();
+    self.resampler_out = Vec::new();
+    self.final_output_buffer = Vec::new();
   }
 }
