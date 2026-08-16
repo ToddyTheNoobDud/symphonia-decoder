@@ -330,7 +330,10 @@ jobs:
       - name: Test bindings
         run: yarn test
         env:
-          NAPI_RS_FORCE_WASI: 1
+          # 'true' is required: the generated loader only treats 'true'/'error'
+          # as forcing the WASI path; '1' means "native preferred" and leaves
+          # the WASI test at the mercy of the native-fallback chain.
+          NAPI_RS_FORCE_WASI: 'true'
   publish:
     name: Publish
     runs-on: ubuntu-latest
