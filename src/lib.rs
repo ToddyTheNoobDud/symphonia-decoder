@@ -698,10 +698,6 @@ impl SymphoniaDecoder {
         }
       }
 
-      if !self.buffer.is_closed() && self.buffer.available_bytes() < STREAM_DECODE_THRESHOLD {
-        break;
-      }
-
       match reader.next_packet() {
         Ok(Some(packet)) => {
           if packet.track_id != track_id {
