@@ -5,7 +5,6 @@
 use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::io::{Error as IoError, Read, Seek, SeekFrom};
-use std::slice;
 use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::*;
@@ -28,7 +27,14 @@ use symphonia::core::meta::MetadataOptions;
 const SAMPLE_MAX: f32 = 32767.0;
 const INITIAL_BUFFER_CAPACITY: usize = 1024 * 1024;
 const PROBE_THRESHOLD: usize = 1024;
-const STREAM_DECODE_THRESHOLD: usize = 1024 * 1024;
+// Minimum buffered compressed bytes before decode() pulls packets from the
+// format reader. This is a batching gate, NOT a correctness requirement:
+// Symphonia reports WouldBlock when a packet is incomplete and decode()
+// simply returns null until more data arrives. A large value (e.g. 1 MiB)
+// delays first PCM for live streams (~65s at 128 kbps). The default is small
+// enough to be imperceptible on live streams while still batching file
+// decodes; pass 0 to initialize() to decode as soon as a packet is available.
+const STREAM_DECODE_THRESHOLD: usize = 16 * 1024;
 const RESAMPLE_CHUNK_SIZE: usize = 4096;
 const MAX_OUTPUT_FRAMES: usize = 4096;
 
@@ -213,14 +219,14 @@ mod helpers {
 
   pub fn append_interleaved_from_decoded(
     decoded: &GenericAudioBufferRef<'_>,
-    out: &mut Vec<i16>,
+    out: &mut Vec<u8>,
     target_channels: usize,
   ) {
     if target_channels == 0 {
       return;
     }
     let frames = decoded.frames();
-    out.reserve(frames * target_channels);
+    out.reserve(frames * target_channels * 2);
 
     macro_rules! process {
       ($buf:expr, $to_f32:expr) => {{
@@ -235,18 +241,18 @@ mod helpers {
           let l_slice = &l[..frames_to_process];
           let r_slice = &r[..frames_to_process];
           for (&ls, &rs) in l_slice.iter().zip(r_slice.iter()) {
-            out.push(f32_to_i16($to_f32(ls)));
-            out.push(f32_to_i16($to_f32(rs)));
+            out.extend_from_slice(&f32_to_i16($to_f32(ls)).to_le_bytes());
+            out.extend_from_slice(&f32_to_i16($to_f32(rs)).to_le_bytes());
           }
         } else {
           for i in 0..frames {
             let lv = l.get(i).map(|&s| $to_f32(s)).unwrap_or(0.0);
             let rv = r.get(i).map(|&s| $to_f32(s)).unwrap_or(0.0);
             if target_channels >= 1 {
-              out.push(f32_to_i16(lv));
+              out.extend_from_slice(&f32_to_i16(lv).to_le_bytes());
             }
             if target_channels >= 2 {
-              out.push(f32_to_i16(rv));
+              out.extend_from_slice(&f32_to_i16(rv).to_le_bytes());
             }
           }
         }
@@ -254,9 +260,36 @@ mod helpers {
     }
 
     match decoded {
+      GenericAudioBufferRef::S16(b) => {
+        let l = b.plane(0).unwrap_or(&[]);
+        let r = if b.num_planes() > 1 {
+          b.plane(1).unwrap_or(l)
+        } else {
+          l
+        };
+        if target_channels == 2 {
+          let frames_to_process = frames.min(l.len()).min(r.len());
+          let l_slice = &l[..frames_to_process];
+          let r_slice = &r[..frames_to_process];
+          for (&ls, &rs) in l_slice.iter().zip(r_slice.iter()) {
+            out.extend_from_slice(&ls.to_le_bytes());
+            out.extend_from_slice(&rs.to_le_bytes());
+          }
+        } else {
+          for i in 0..frames {
+            let lv = l.get(i).copied().unwrap_or(0);
+            if target_channels >= 1 {
+              out.extend_from_slice(&lv.to_le_bytes());
+            }
+            if target_channels >= 2 {
+              let rv = r.get(i).copied().unwrap_or(lv);
+              out.extend_from_slice(&rv.to_le_bytes());
+            }
+          }
+        }
+      }
       GenericAudioBufferRef::F32(b) => process!(b, |s: f32| s),
       GenericAudioBufferRef::F64(b) => process!(b, |s: f64| s as f32),
-      GenericAudioBufferRef::S16(b) => process!(b, |s: i16| s as f32 / 32_767.0),
       GenericAudioBufferRef::U8(b) => process!(b, |s: u8| (s as f32 - 128.0) / 128.0),
       GenericAudioBufferRef::S24(b) => {
         process!(b, |s: i24| s.inner() as f32 / 8_388_607.0)
@@ -377,7 +410,7 @@ fn process_resampler_chunk(
   resampler: &mut Fft<f32>,
   input: &[Vec<f32>],
   out_buf: &mut [Vec<f32>],
-  output: &mut Vec<i16>,
+  output: &mut Vec<u8>,
   channels: usize,
   chunk_size: usize,
   partial_len: Option<usize>,
@@ -402,7 +435,8 @@ fn process_resampler_chunk(
 
   for f in 0..frames {
     for ch_buf in out_buf.iter().take(channels) {
-      output.push(helpers::f32_to_i16(ch_buf.get(f).copied().unwrap_or(0.0)));
+      let sample = helpers::f32_to_i16(ch_buf.get(f).copied().unwrap_or(0.0));
+      output.extend_from_slice(&sample.to_le_bytes());
     }
   }
 
@@ -414,7 +448,7 @@ fn flush_resampler_tail(
   accum: &mut [RingBuf],
   resampler_in: &mut [Vec<f32>],
   out_buf: &mut [Vec<f32>],
-  output: &mut Vec<i16>,
+  output: &mut Vec<u8>,
   channels: usize,
   chunk_size: usize,
 ) -> napi::Result<()> {
@@ -489,8 +523,9 @@ pub struct SymphoniaDecoder {
   resampler_in: Vec<Vec<f32>>,
   resampler_out: Vec<Vec<f32>>,
   resample_chunk_size: usize,
+  stream_decode_threshold: usize,
 
-  final_output_buffer: Vec<i16>,
+  final_output_buffer: Vec<u8>,
 }
 
 impl Default for SymphoniaDecoder {
@@ -522,7 +557,8 @@ impl SymphoniaDecoder {
         .collect(),
       resampler_out: Vec::new(),
       resample_chunk_size: RESAMPLE_CHUNK_SIZE,
-      final_output_buffer: Vec::with_capacity(MAX_OUTPUT_FRAMES * target_channels),
+      stream_decode_threshold: STREAM_DECODE_THRESHOLD,
+      final_output_buffer: Vec::with_capacity(MAX_OUTPUT_FRAMES * target_channels * 2),
     }
   }
 
@@ -552,10 +588,22 @@ impl SymphoniaDecoder {
   /// Probe the format and set up the decoder when enough input is available.
   /// `codec_registry_hint` is an optional file extension (e.g. `"flac"`, `"mp3"`)
   /// that speeds up probing; pass `null` to auto-detect.
+  ///
+  /// `stream_decode_threshold` optionally overrides the number of buffered
+  /// compressed bytes required before `decode()` starts producing PCM. Lower
+  /// values reduce start-up latency on live streams (default: 16 KiB ≈ 1s at
+  /// 128 kbps); pass `0` to decode as soon as a packet is available.
   #[napi]
-  pub fn initialize(&mut self, codec_registry_hint: Option<String>) -> Result<bool> {
+  pub fn initialize(
+    &mut self,
+    codec_registry_hint: Option<String>,
+    stream_decode_threshold: Option<u32>,
+  ) -> Result<bool> {
     if self.is_probed {
       return Ok(true);
+    }
+    if let Some(threshold) = stream_decode_threshold {
+      self.stream_decode_threshold = threshold as usize;
     }
     if !self.buffer.is_closed() && self.buffer.available_bytes() < PROBE_THRESHOLD {
       return Ok(false);
@@ -668,7 +716,7 @@ impl SymphoniaDecoder {
     let needs_resample = self.resampler.is_some();
     let chunk_size = self.resample_chunk_size;
     let target_channels = self.target_channels;
-    let max_samples = MAX_OUTPUT_FRAMES * target_channels;
+    let max_samples = MAX_OUTPUT_FRAMES * target_channels * 2; // bytes
 
     self.final_output_buffer.clear();
 
@@ -698,7 +746,7 @@ impl SymphoniaDecoder {
         }
       }
 
-      if !self.buffer.is_closed() && self.buffer.available_bytes() < STREAM_DECODE_THRESHOLD {
+      if !self.buffer.is_closed() && self.buffer.available_bytes() < self.stream_decode_threshold {
         break;
       }
 
@@ -777,12 +825,12 @@ impl SymphoniaDecoder {
       return Ok(None);
     }
 
-    let byte_len = self.final_output_buffer.len() * 2;
-    let ptr = self.final_output_buffer.as_ptr() as *const u8;
-    let bytes = unsafe { slice::from_raw_parts(ptr, byte_len) };
+    // Transferring the Vec into the Buffer is zero-copy on Node (external
+    // buffer with a finalizer); Buffer::from(&[u8]) would memcpy instead.
+    let out = std::mem::take(&mut self.final_output_buffer);
 
     Ok(Some(DecodeResult {
-      samples: Buffer::from(bytes),
+      samples: Buffer::from(out),
       sample_rate: self.target_rate,
       channels: target_channels as u32,
     }))

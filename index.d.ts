@@ -22,8 +22,13 @@ export declare class SymphoniaDecoder {
    * Probe the format and set up the decoder when enough input is available.
    * `codec_registry_hint` is an optional file extension (e.g. `"flac"`, `"mp3"`)
    * that speeds up probing; pass `null` to auto-detect.
+   *
+   * `stream_decode_threshold` optionally overrides the number of buffered
+   * compressed bytes required before `decode()` starts producing PCM. Lower
+   * values reduce start-up latency on live streams (default: 16 KiB ≈ 1s at
+   * 128 kbps); pass `0` to decode as soon as a packet is available.
    */
-  initialize(codecRegistryHint?: string | undefined | null): boolean
+  initialize(codecRegistryHint?: string | undefined | null, streamDecodeThreshold?: number | undefined | null): boolean
   decode(): DecodeResult | null
   flush(): void
   free(): void
