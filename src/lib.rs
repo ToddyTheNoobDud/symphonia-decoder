@@ -11,7 +11,8 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use rubato::{
-  Fft, FixedSync, Indexing, Resampler, audioadapter_buffers::direct::SequentialSliceOfVecs,
+  Fft, FixedSync, Indexing, Resampler, WindowFunction,
+  audioadapter_buffers::direct::SequentialSliceOfVecs,
 };
 
 use symphonia::core::audio::sample::i24;
@@ -665,12 +666,16 @@ impl SymphoniaDecoder {
 
     let source_rate = audio_params.sample_rate.unwrap_or(self.target_rate);
     if source_rate != self.target_rate {
-      let resampler = Fft::<f32>::new(
+      // new_custom with sub_chunks = 1 reproduces the v2 behavior (one FFT block
+      // per chunk, BlackmanHarris2 window). v5's default `new()` would pick
+      // chunk_size / 256 sub-chunks for lower delay; not what we had before.
+      let resampler = Fft::<f32>::new_custom(
         source_rate as usize,      // input sample rate
         self.target_rate as usize, // output sample rate
         self.resample_chunk_size,  // input chunk size (FixedSync::Input)
-        1,                         // sub_chunks quality factor
+        1,                         // sub_chunks (1 = one FFT block per chunk)
         self.target_channels,      // output channels
+        WindowFunction::BlackmanHarris2,
         FixedSync::Input,
       )
       .map_err(|e| Error::from_reason(format!("Failed to create resampler: {e}")))?;
