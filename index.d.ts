@@ -3,8 +3,7 @@
 /**
  * Streaming Symphonia decoder.
  *
- * Lifecycle
- * 1. `push(chunk)` feeds compressed data.
+ * Lifecycle/// 1. `push(chunk)` feeds compressed data.
  * 2. `initialize(hint?)` probes once enough header/metadata is available.
  * 3. `decode()` returns PCM when a full packet is available, or `null` when
  *    more compressed input is needed.
