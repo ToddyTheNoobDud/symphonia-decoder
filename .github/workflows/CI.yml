@@ -129,6 +129,14 @@ jobs:
         shell: bash
       - name: Install dependencies
         run: yarn install
+      - name: Install wasi-sdk sysroot for bundled libopus
+        if: ${{ matrix.settings.target == 'wasm32-wasip1-threads' }}
+        run: |
+          curl -sL -o /tmp/wasi-sdk.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
+          mkdir -p /tmp/wasi-sdk
+          tar -xzf /tmp/wasi-sdk.tar.gz -C /tmp/wasi-sdk --strip-components=1
+          echo "CFLAGS_wasm32_wasip1_threads=--sysroot=/tmp/wasi-sdk/share/wasi-sysroot" >> $GITHUB_ENV
+        shell: bash
       - name: Build
         run: ${{ matrix.settings.build }}
         shell: bash
