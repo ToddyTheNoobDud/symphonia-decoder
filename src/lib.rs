@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::io::{Error as IoError, Read, Seek, SeekFrom};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -19,11 +19,13 @@ use symphonia::core::audio::sample::i24;
 use symphonia::core::audio::{Audio, GenericAudioBufferRef};
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
+use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
+use symphonia_adapter_libopus::OpusDecoder;
 
 const SAMPLE_MAX: f32 = 32767.0;
 const INITIAL_BUFFER_CAPACITY: usize = 1024 * 1024;
@@ -497,10 +499,24 @@ pub struct DecodeResult {
   pub channels: u32,
 }
 
+/// Codec registry with every default Symphonia decoder plus Opus via libopus.
+///
+/// Symphonia has no first-party Opus support, so Ogg Opus streams fail with
+/// "unsupported audio codec" unless the adapter is registered here.
+static CODEC_REGISTRY: OnceLock<CodecRegistry> = OnceLock::new();
+
+fn get_codec_registry() -> &'static CodecRegistry {
+  CODEC_REGISTRY.get_or_init(|| {
+    let mut registry = CodecRegistry::new();
+    symphonia::default::register_enabled_codecs(&mut registry);
+    registry.register_audio_decoder::<OpusDecoder>();
+    registry
+  })
+}
+
 /// Streaming Symphonia decoder.
 ///
-/// Lifecycle
-/// 1. `push(chunk)` feeds compressed data.
+/// Lifecycle/// 1. `push(chunk)` feeds compressed data.
 /// 2. `initialize(hint?)` probes once enough header/metadata is available.
 /// 3. `decode()` returns PCM when a full packet is available, or `null` when
 ///    more compressed input is needed.
@@ -660,7 +676,7 @@ impl SymphoniaDecoder {
       return Err(Error::from_reason("No audio track found"));
     };
 
-    let decoder = symphonia::default::get_codecs()
+    let decoder = get_codec_registry()
       .make_audio_decoder(&audio_params, &AudioDecoderOptions::default())
       .map_err(|e| Error::from_reason(format!("Failed to create decoder: {e}")))?;
 

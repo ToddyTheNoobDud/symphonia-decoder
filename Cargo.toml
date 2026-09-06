@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 napi = "3.12.1"
 napi-derive = "3.6.3"
 symphonia = { version = "0.6.1", features = ["all"] }
+symphonia-adapter-libopus = "0.3"
 rubato = "5.0.0"
 
 [build-dependencies]
