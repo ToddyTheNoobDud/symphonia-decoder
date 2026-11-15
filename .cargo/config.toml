@@ -1,2 +1,6 @@
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.wasm32-wasip1-threads]
+# NAPI-RS gates its threaded WASI async runtime on this cfg.
+rustflags = ["--cfg", "tokio_unstable"]
