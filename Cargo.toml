@@ -15,10 +15,12 @@ symphonia = { version = "0.6.1", features = ["all"] }
 symphonia-adapter-libopus = "0.3.0"
 rubato = "5.1.0"
 
-# ARM CI toolchains (napi cross-toolchain gcc 4.8) cannot compile opus
-# 1.6.x NEON intrinsics: build libopus as pure C on 32/64-bit ARM only.
-# x86, Windows, macOS and WASI keep SIMD.
+# The GCC 4.8 CI toolchains cannot build Opus NEON on ARM and enable
+# AVX2 without the SSE4.1 declarations on Linux x64 GNU.
 [target.'cfg(any(target_arch = "aarch64", target_arch = "arm"))'.dependencies]
+opusic-sys = { version = "0.7.7", features = ["no-simd"] }
+
+[target.x86_64-unknown-linux-gnu.dependencies]
 opusic-sys = { version = "0.7.7", features = ["no-simd"] }
 
 [build-dependencies]
