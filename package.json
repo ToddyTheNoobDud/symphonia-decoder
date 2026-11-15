@@ -65,23 +65,23 @@
     "prepare": "husky"
   },
   "devDependencies": {
-    "@emnapi/core": "^2.0.0-alpha.4",
-    "@emnapi/runtime": "^2.0.0-alpha.4",
-    "@napi-rs/cli": "^3.8.6",
-    "@napi-rs/wasm-runtime": "^1.2.3",
-    "@oxc-node/core": "^0.1.0",
+    "@emnapi/core": "^2.0.0-beta.3",
+    "@emnapi/runtime": "^2.0.0-beta.3",
+    "@napi-rs/cli": "^3.10.12",
+    "@napi-rs/wasm-runtime": "^1.2.7",
+    "@oxc-node/core": "^1.0.2",
     "@taplo/cli": "^0.7.0",
-    "@tybys/wasm-util": "^0.10.3",
-    "ava": "^8.0.0",
-    "chalk": "^5.6.2",
-    "emnapi": "^2.0.0-alpha.4",
+    "@tybys/wasm-util": "^0.10.4",
+    "ava": "^8.4.0",
+    "chalk": "^6.0.1",
+    "emnapi": "^2.0.0-beta.3",
     "husky": "^9.1.7",
-    "lint-staged": "^17.0.5",
-    "npm-run-all2": "^8.0.4",
-    "oxlint": "^1.65.0",
-    "prettier": "^3.8.3",
-    "tinybench": "^6.0.2",
-    "typescript": "^6.0.3"
+    "lint-staged": "^17.6.0",
+    "npm-run-all2": "^9.0.4",
+    "oxlint": "^1.93.0",
+    "prettier": "^3.10.1",
+    "tinybench": "^6.2.3",
+    "typescript": "^7.0.2"
   },
   "lint-staged": {
     "*.@(js|ts|tsx)": [
@@ -115,5 +115,5 @@
     "singleQuote": true,
     "arrowParens": "always"
   },
-  "packageManager": "yarn@4.14.1"
+  "packageManager": "yarn@4.18.1"
 }

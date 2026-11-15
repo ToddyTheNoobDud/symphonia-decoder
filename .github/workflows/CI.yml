@@ -30,15 +30,14 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: yarn
       - name: Install
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - name: Install dependencies
-        run: yarn install
+        run: corepack yarn install
       - name: Oxlint
-        run: yarn lint
+        run: corepack yarn lint
       - name: Cargo fmt
         run: cargo fmt -- --check
       - name: Clippy
@@ -50,43 +49,43 @@ jobs:
         settings:
           - host: macos-latest
             target: x86_64-apple-darwin
-            build: yarn build --target x86_64-apple-darwin
+            build: corepack yarn build --target x86_64-apple-darwin
           - host: windows-latest
-            build: yarn build --target x86_64-pc-windows-msvc
+            build: corepack yarn build --target x86_64-pc-windows-msvc
             target: x86_64-pc-windows-msvc
           - host: windows-latest
-            build: yarn build --target i686-pc-windows-msvc
+            build: corepack yarn build --target i686-pc-windows-msvc
             target: i686-pc-windows-msvc
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: yarn build --target x86_64-unknown-linux-gnu --use-napi-cross
+            build: corepack yarn build --target x86_64-unknown-linux-gnu --use-napi-cross
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            build: yarn build --target x86_64-unknown-linux-musl -x
+            build: corepack yarn build --target x86_64-unknown-linux-musl -x
           - host: macos-latest
             target: aarch64-apple-darwin
-            build: yarn build --target aarch64-apple-darwin
+            build: corepack yarn build --target aarch64-apple-darwin
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            build: yarn build --target aarch64-unknown-linux-gnu --use-napi-cross
+            build: corepack yarn build --target aarch64-unknown-linux-gnu --use-napi-cross
           - host: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
-            build: yarn build --target armv7-unknown-linux-gnueabihf --use-napi-cross
+            build: corepack yarn build --target armv7-unknown-linux-gnueabihf --use-napi-cross
           - host: ubuntu-latest
             target: aarch64-linux-android
-            build: yarn build --target aarch64-linux-android
+            build: corepack yarn build --target aarch64-linux-android
           - host: ubuntu-latest
             target: armv7-linux-androideabi
-            build: yarn build --target armv7-linux-androideabi
+            build: corepack yarn build --target armv7-linux-androideabi
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            build: yarn build --target aarch64-unknown-linux-musl -x
+            build: corepack yarn build --target aarch64-unknown-linux-musl -x
           - host: windows-latest
             target: aarch64-pc-windows-msvc
-            build: yarn build --target aarch64-pc-windows-msvc
+            build: corepack yarn build --target aarch64-pc-windows-msvc
           - host: ubuntu-latest
             target: wasm32-wasip1-threads
-            build: yarn build --target wasm32-wasip1-threads
+            build: corepack yarn build --target wasm32-wasip1-threads
     name: stable - ${{ matrix.settings.target }} - node@22
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -95,7 +94,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: yarn
       - name: Install
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -128,7 +126,7 @@ jobs:
         if: ${{ matrix.settings.setup }}
         shell: bash
       - name: Install dependencies
-        run: yarn install
+        run: corepack yarn install
       - name: Install wasi-sdk sysroot for bundled libopus
         if: ${{ matrix.settings.target == 'wasm32-wasip1-threads' }}
         run: |
@@ -168,7 +166,7 @@ jobs:
           shell: bash
           run: |
             sudo pkg install -y -f curl node libnghttp2 npm cmake
-            sudo npm install -g yarn --ignore-scripts
+            sudo npm install -g corepack --ignore-scripts
             curl https://sh.rustup.rs -sSf --output rustup.sh
             sh rustup.sh -y --profile minimal --default-toolchain stable
             source "$HOME/.cargo/env"
@@ -176,15 +174,15 @@ jobs:
             rustc --version
             echo "~~~~ node -v ~~~~"
             node -v
-            echo "~~~~ yarn --version ~~~~"
-            yarn --version
+            echo "~~~~ corepack yarn --version ~~~~"
+            corepack yarn --version
             pwd
             ls -lah
             whoami
             env
             freebsd-version
-            yarn install
-            yarn build
+            corepack yarn install
+            corepack yarn build
             rm -rf node_modules
             rm -rf target
             rm -rf .yarn/cache
@@ -224,10 +222,9 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
-          cache: yarn
           architecture: ${{ matrix.settings.architecture }}
       - name: Install dependencies
-        run: yarn install
+        run: corepack yarn install
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
@@ -237,7 +234,7 @@ jobs:
         run: ls -R .
         shell: bash
       - name: Test bindings
-        run: yarn test
+        run: corepack yarn test
   test-linux-binding:
     name: Test ${{ matrix.target }} - node@${{ matrix.node }}
     needs:
@@ -264,7 +261,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
-          cache: yarn
       - name: Output docker params
         id: docker
         run: |
@@ -286,9 +282,9 @@ jobs:
           " >> $GITHUB_OUTPUT
       - name: Install dependencies
         run: |
-          yarn config set --json supportedArchitectures.cpu '["current", "arm64", "x64", "arm"]'
-          yarn config set --json supportedArchitectures.libc '["current", "musl", "gnu"]'
-          yarn install
+          corepack yarn config set --json supportedArchitectures.cpu '["current", "arm64", "x64", "arm"]'
+          corepack yarn config set --json supportedArchitectures.libc '["current", "musl", "gnu"]'
+          corepack yarn install
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
@@ -310,7 +306,7 @@ jobs:
           image: ${{ steps.docker.outputs.IMAGE }}
           name: test-bindings-${{ matrix.target }}
           options: '-v ${{ github.workspace }}:${{ github.workspace }} -w ${{ github.workspace }} --platform ${{ steps.docker.outputs.PLATFORM }}'
-          args: yarn test
+          args: corepack yarn test
   test-wasi:
     name: Test WASI target
     needs:
@@ -322,11 +318,10 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: yarn
       - name: Install dependencies
         run: |
-          yarn config set supportedArchitectures.cpu "wasm32"
-          yarn install
+          corepack yarn config set supportedArchitectures.cpu "wasm32"
+          corepack yarn install
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
@@ -336,7 +331,7 @@ jobs:
         run: ls -R .
         shell: bash
       - name: Test bindings
-        run: yarn test
+        run: corepack yarn test
         env:
           # 'true' is required: the generated loader only treats 'true'/'error'
           # as forcing the WASI path; '1' means "native preferred" and leaves
@@ -360,17 +355,16 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: yarn
       - name: Install dependencies
-        run: yarn install
+        run: corepack yarn install
       - name: create npm dirs
-        run: yarn napi create-npm-dirs
+        run: corepack yarn napi create-npm-dirs
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Move artifacts
-        run: yarn artifacts
+        run: corepack yarn artifacts
       - name: List packages
         run: ls -R ./npm
         shell: bash

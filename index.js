@@ -701,3 +701,7 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.SymphoniaDecoder = nativeBinding.SymphoniaDecoder
+module.exports.demuxMp4Aac = nativeBinding.demuxMp4Aac
+module.exports.openMp4Audio = nativeBinding.openMp4Audio
+module.exports.Mp4AudioReader = nativeBinding.Mp4AudioReader
+module.exports.PcmResampler = nativeBinding.PcmResampler

@@ -1,5 +1,29 @@
 # `@napi-rs/package-template`
 
+## MP4 demux for NodeLink
+
+`demuxMp4Aac(buffer)` returns raw AAC packets, decode timestamps in seconds,
+and the track's AudioSpecificConfig. It requires a complete input buffer and
+is intended for the Eternalbox cache.
+
+`openMp4Audio(size, read, seekSeconds?)` opens a seekable source. Pass
+`null` for a forward-only MP4 with its index before the media. The callback
+must satisfy each read in full, except at EOF on a forward-only source.
+Use `readPackets(limit)` for compressed AAC or Opus, and `readPcm()` for
+48 kHz stereo ALAC output. Cancel pending transport reads before `close()`.
+
+For AAC decoded by FAAD2, create one `PcmResampler(inputRate, quality)`
+per stream. Feed interleaved floats and the channel count to `process()`.
+It downmixes to stereo and returns signed 16-bit little-endian PCM at 48 kHz.
+Collect `finish()` at end of stream to drain the resampler, or call
+`close()` to discard pending frames on cancellation.
+
+To test locally in NodeLink, build the native addon with `cargo build --release`
+using a C toolchain and CMake. Install its loader, declarations and platform
+binary together into NodeLink's `node_modules/@toddynnn/symphonia-decoder`.
+The contract tests use FFmpeg, FFprobe and localhost HTTP. Run them from
+the NodeLink checkout.
+
 ![https://github.com/napi-rs/package-template/actions](https://github.com/napi-rs/package-template/workflows/CI/badge.svg)
 
 > Template project for writing node packages with napi-rs.
@@ -74,14 +98,13 @@ Ensure you have set your **NPM_TOKEN** in the `GitHub` project setting.
 
 In `Settings -> Secrets`, add **NPM_TOKEN** into it.
 
-When you want to release the package:
+Set the npm version before regenerating the loader and declarations. For `1.3.0`:
 
-```bash
-npm version [<newversion> | major | minor | patch | premajor | preminor | prepatch | prerelease [--preid=<prerelease-id>] | from-git]
-
-git push
+```sh
+npm version 1.3.0 --no-git-tag-version --ignore-scripts
+corepack yarn build
+corepack yarn test
 ```
 
-GitHub actions will do the rest job for you.
-
-> WARN: Don't run `npm publish` manually.
+Review and commit the changes with `1.3.0` as the commit message. Push that
+commit to `main` to run the platform builds and tests before CI publishes.

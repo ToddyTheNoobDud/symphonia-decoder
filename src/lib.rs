@@ -4,10 +4,11 @@
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
-use std::io::{Error as IoError, Read, Seek, SeekFrom};
+use std::io::{Cursor, Error as IoError, Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use napi::bindgen_prelude::*;
+use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
 
 use rubato::{
@@ -18,14 +19,18 @@ use rubato::{
 use symphonia::core::audio::sample::i24;
 use symphonia::core::audio::{Audio, GenericAudioBufferRef};
 use symphonia::core::codecs::CodecParameters;
+use symphonia::core::codecs::audio::well_known::{CODEC_ID_AAC, CODEC_ID_ALAC, CODEC_ID_OPUS};
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
+use symphonia::core::units::Time;
 use symphonia_adapter_libopus::OpusDecoder;
+
+mod pcm;
 
 const SAMPLE_MAX: f32 = 32767.0;
 const INITIAL_BUFFER_CAPACITY: usize = 1024 * 1024;
@@ -40,6 +45,359 @@ const PROBE_THRESHOLD: usize = 1024;
 const STREAM_DECODE_THRESHOLD: usize = 16 * 1024;
 const RESAMPLE_CHUNK_SIZE: usize = 4096;
 const MAX_OUTPUT_FRAMES: usize = 4096;
+
+#[napi(object)]
+pub struct Mp4AacPacket {
+  pub data: Buffer,
+  pub start: f64,
+  pub end: f64,
+}
+
+#[napi(object)]
+pub struct Mp4AacTrack {
+  pub sample_rate: u32,
+  pub channels: u32,
+  pub config: Buffer,
+  pub packets: Vec<Mp4AacPacket>,
+}
+
+type FetchMp4Range = ThreadsafeFunction<(f64, u32), Promise<Buffer>>;
+
+struct Mp4RangeSource {
+  fetch: FetchMp4Range,
+  length: Option<u64>,
+  position: u64,
+}
+
+impl Read for Mp4RangeSource {
+  fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+    let available = self
+      .length
+      .map_or(u64::MAX, |length| length.saturating_sub(self.position));
+    let length = available.min(output.len() as u64).min(128 * 1024) as u32;
+    if length == 0 {
+      return Ok(0);
+    }
+    /* INFO: Complete each read before Symphonia advances its MP4 sample iterator. */
+    let bytes = napi::bindgen_prelude::block_on(async {
+      self
+        .fetch
+        .call_async(Ok((self.position as f64, length)))
+        .await?
+        .await
+    })
+    .map_err(|error| IoError::other(error.to_string()))?;
+    if bytes.len() > length as usize || (self.length.is_some() && bytes.len() != length as usize) {
+      return Err(IoError::new(
+        ErrorKind::UnexpectedEof,
+        "Incomplete MP4 range",
+      ));
+    }
+    output[..bytes.len()].copy_from_slice(&bytes);
+    self.position += bytes.len() as u64;
+    Ok(bytes.len())
+  }
+}
+
+impl Seek for Mp4RangeSource {
+  fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+    let position = match from {
+      SeekFrom::Start(position) => Some(position),
+      SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
+      SeekFrom::End(offset) => self
+        .length
+        .and_then(|length| length.checked_add_signed(offset)),
+    }
+    .ok_or_else(|| IoError::new(ErrorKind::InvalidInput, "Invalid MP4 offset"))?;
+    self.position = position;
+    Ok(position)
+  }
+}
+
+impl MediaSource for Mp4RangeSource {
+  fn is_seekable(&self) -> bool {
+    self.length.is_some()
+  }
+  fn byte_len(&self) -> Option<u64> {
+    self.length
+  }
+}
+
+struct Mp4AudioState {
+  reader: Box<dyn FormatReader + 'static>,
+  track_id: u32,
+  seconds_per_tick: f64,
+  alac: Option<SymphoniaDecoder>,
+}
+
+#[napi]
+pub struct Mp4AudioReader {
+  state: Arc<Mutex<Option<Mp4AudioState>>>,
+  codec: String,
+  sample_rate: Option<u32>,
+  channels: Option<u32>,
+  config: Vec<u8>,
+}
+
+/// Opens an MP4 using a random-access callback without loading its media data.
+#[napi]
+pub async fn open_mp4_audio(
+  length: Option<f64>,
+  #[napi(
+    ts_arg_type = "(error: Error | null, range: [start: number, length: number]) => Promise<Buffer>"
+  )]
+  fetch: FetchMp4Range,
+  seek_seconds: Option<f64>,
+) -> Result<Mp4AudioReader> {
+  if length.is_some_and(|length| {
+    !(1.0..=9_007_199_254_740_991.0).contains(&length) || length.fract() != 0.0
+  }) {
+    return Err(Error::from_reason("Invalid MP4 byte length"));
+  }
+  spawn_blocking(move || {
+    let source = MediaSourceStream::new(
+      Box::new(Mp4RangeSource {
+        fetch,
+        length: length.map(|length| length as u64),
+        position: 0,
+      }),
+      Default::default(),
+    );
+    let mut reader = probe_mp4(source)?;
+    let (track, parameters, codec) = reader
+      .tracks()
+      .iter()
+      .find_map(|track| {
+        let parameters = track.codec_params.as_ref()?.audio()?;
+        let codec = match parameters.codec {
+          CODEC_ID_AAC => "aac",
+          CODEC_ID_ALAC => "alac",
+          CODEC_ID_OPUS => "opus",
+          _ => return None,
+        };
+        Some((track, parameters, codec))
+      })
+      .ok_or_else(|| Error::from_reason("No supported track found in MP4"))?;
+    let track_id = track.id;
+    let seconds_per_tick = f64::from(
+      track
+        .time_base
+        .ok_or_else(|| Error::from_reason("MP4 audio track has no time base"))?,
+    );
+    let sample_rate = parameters.sample_rate;
+    let channels = parameters
+      .channels
+      .as_ref()
+      .map(|layout| layout.count() as u32);
+    let config = parameters
+      .extra_data
+      .as_deref()
+      .unwrap_or_default()
+      .to_vec();
+    let alac = if codec == "alac" {
+      let mut decoder = SymphoniaDecoder::new();
+      decoder.configure_audio_decoder(track_id, parameters)?;
+      Some(decoder)
+    } else {
+      None
+    };
+    if let Some(seconds) = seek_seconds.filter(|seconds| *seconds != 0.0) {
+      let time = Time::try_from_secs_f64(seconds)
+        .ok_or_else(|| Error::from_reason("Invalid MP4 seek time"))?;
+      reader
+        .seek(
+          SeekMode::Accurate,
+          SeekTo::Time {
+            time,
+            track_id: Some(track_id),
+          },
+        )
+        .map_err(|error| Error::from_reason(format!("MP4 seek failed: {error}")))?;
+    }
+    Ok(Mp4AudioReader {
+      state: Arc::new(Mutex::new(Some(Mp4AudioState {
+        reader,
+        track_id,
+        seconds_per_tick,
+        alac,
+      }))),
+      codec: codec.to_owned(),
+      sample_rate,
+      channels,
+      config,
+    })
+  })
+  .await
+  .map_err(|error| Error::from_reason(error.to_string()))?
+}
+
+#[napi]
+impl Mp4AudioReader {
+  #[napi(getter)]
+  pub fn codec(&self) -> String {
+    self.codec.clone()
+  }
+
+  #[napi(getter)]
+  pub fn sample_rate(&self) -> Option<u32> {
+    self.sample_rate
+  }
+
+  #[napi(getter)]
+  pub fn channels(&self) -> Option<u32> {
+    self.channels
+  }
+
+  #[napi(getter)]
+  pub fn config(&self) -> Buffer {
+    self.config.clone().into()
+  }
+
+  #[napi]
+  pub async fn read_packets(&self, limit: u32) -> Result<Vec<Mp4AacPacket>> {
+    let state = Arc::clone(&self.state);
+    spawn_blocking(move || {
+      let mut state = state
+        .lock()
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+      let Some(state) = state.as_mut() else {
+        return Ok(Vec::new());
+      };
+      let mut packets = Vec::new();
+      while packets.len() < limit.clamp(1, 256) as usize {
+        let Some(packet) = state
+          .reader
+          .next_packet()
+          .map_err(|error| Error::from_reason(format!("MP4 packet extraction failed: {error}")))?
+        else {
+          break;
+        };
+        if packet.track_id == state.track_id {
+          let ticks = packet.dts.get() as f64;
+          packets.push(Mp4AacPacket {
+            data: packet.data.into_vec().into(),
+            start: ticks * state.seconds_per_tick,
+            end: (ticks + packet.dur.get() as f64) * state.seconds_per_tick,
+          });
+        }
+      }
+      Ok(packets)
+    })
+    .await
+    .map_err(|error| Error::from_reason(error.to_string()))?
+  }
+
+  /// Decodes an ALAC track to 48 kHz stereo PCM using the same resampler as other formats.
+  #[napi]
+  pub async fn read_pcm(&self) -> Result<Option<Buffer>> {
+    let state = Arc::clone(&self.state);
+    spawn_blocking(move || {
+      let mut state = state
+        .lock()
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+      let Some(state) = state.as_mut() else {
+        return Ok(None);
+      };
+      let decoder = state
+        .alac
+        .as_mut()
+        .ok_or_else(|| Error::from_reason("MP4 PCM extraction requires ALAC"))?;
+      Ok(
+        decoder
+          .decode_from_reader(state.reader.as_mut(), true)?
+          .map(|result| result.samples),
+      )
+    })
+    .await
+    .map_err(|error| Error::from_reason(error.to_string()))?
+  }
+
+  #[napi]
+  pub async fn close(&self) -> Result<()> {
+    let state = Arc::clone(&self.state);
+    spawn_blocking(move || {
+      state
+        .lock()
+        .map_err(|error| Error::from_reason(error.to_string()))?
+        .take();
+      Ok(())
+    })
+    .await
+    .map_err(|error| Error::from_reason(error.to_string()))?
+  }
+}
+
+fn probe_mp4(source: MediaSourceStream<'_>) -> Result<Box<dyn FormatReader + '_>> {
+  let mut hint = Hint::new();
+  hint.with_extension("mp4");
+  symphonia::default::get_probe()
+    .probe(
+      &hint,
+      source,
+      FormatOptions::default(),
+      MetadataOptions::default(),
+    )
+    .map_err(|error| Error::from_reason(format!("Invalid MP4: {error}")))
+}
+
+/// Extracts compressed AAC and decode timestamps from a complete MP4/M4A buffer.
+#[napi]
+pub fn demux_mp4_aac(input: BufferSlice<'_>) -> Result<Mp4AacTrack> {
+  /*
+    INFO: Borrow the complete input for this synchronous call. Retain only the
+      AAC packets owned by the result, never the original MP4 or its video.
+    SOURCES:
+      - https://napi.rs/docs/concepts/typed-array#borrowed-types-bufferslice-uint8arrayslice-etc
+  */
+  let source = MediaSourceStream::new(Box::new(Cursor::new(input.as_ref())), Default::default());
+  let mut reader = probe_mp4(source)?;
+  let (track, codec) = reader
+    .tracks()
+    .iter()
+    .filter_map(|track| Some((track, track.codec_params.as_ref()?.audio()?)))
+    .find(|(_, codec)| codec.codec == CODEC_ID_AAC)
+    .ok_or_else(|| Error::from_reason("MP4 has no AAC track"))?;
+  let track_id = track.id;
+  let seconds_per_tick = f64::from(
+    track
+      .time_base
+      .ok_or_else(|| Error::from_reason("MP4 AAC track has no time base"))?,
+  );
+  let sample_rate = codec
+    .sample_rate
+    .ok_or_else(|| Error::from_reason("MP4 AAC track has no sample rate"))?;
+  let channels = codec
+    .channels
+    .as_ref()
+    .map(|channels| channels.count() as u32)
+    .ok_or_else(|| Error::from_reason("MP4 AAC track has no channel layout"))?;
+  let config = codec
+    .extra_data
+    .as_deref()
+    .ok_or_else(|| Error::from_reason("MP4 AAC track has no decoder configuration"))?
+    .to_vec()
+    .into();
+  let mut packets = Vec::new();
+  while let Some(packet) = reader
+    .next_packet()
+    .map_err(|error| Error::from_reason(format!("MP4 packet extraction failed: {error}")))?
+  {
+    if packet.track_id == track_id {
+      let ticks = packet.dts.get() as f64;
+      packets.push(Mp4AacPacket {
+        data: packet.data.into_vec().into(),
+        start: ticks * seconds_per_tick,
+        end: (ticks + packet.dur.get() as f64) * seconds_per_tick,
+      });
+    }
+  }
+  Ok(Mp4AacTrack {
+    sample_rate,
+    channels,
+    config,
+    packets,
+  })
+}
 
 #[derive(Default)]
 struct BufferState {
@@ -676,8 +1034,38 @@ impl SymphoniaDecoder {
       return Err(Error::from_reason("No audio track found"));
     };
 
+    self.configure_audio_decoder(id, &audio_params)?;
+    self.format_reader = Some(reader);
+    self.buffer.commit_probe();
+    self.is_probed = true;
+    Ok(true)
+  }
+
+  #[napi]
+  pub fn decode(&mut self) -> Result<Option<DecodeResult>> {
+    if !self.is_probed || self.exhausted {
+      return Ok(None);
+    }
+
+    let mut reader = self
+      .format_reader
+      .take()
+      .ok_or_else(|| Error::from_reason("Format reader gone"))?;
+    let complete_reads = self.buffer.is_closed();
+    let result = self.decode_from_reader(reader.as_mut(), complete_reads);
+    self.format_reader = Some(reader);
+    result
+  }
+}
+
+impl SymphoniaDecoder {
+  fn configure_audio_decoder(
+    &mut self,
+    id: u32,
+    audio_params: &symphonia::core::codecs::audio::AudioCodecParameters,
+  ) -> Result<()> {
     let decoder = get_codec_registry()
-      .make_audio_decoder(&audio_params, &AudioDecoderOptions::default())
+      .make_audio_decoder(audio_params, &AudioDecoderOptions::default())
       .map_err(|e| Error::from_reason(format!("Failed to create decoder: {e}")))?;
 
     let source_rate = audio_params.sample_rate.unwrap_or(self.target_rate);
@@ -710,22 +1098,17 @@ impl SymphoniaDecoder {
 
     self.track_id = Some(id);
     self.audio_decoder = Some(decoder);
-    self.format_reader = Some(reader);
-    self.buffer.commit_probe();
-    self.is_probed = true;
-    Ok(true)
+    Ok(())
   }
 
-  #[napi]
-  pub fn decode(&mut self) -> Result<Option<DecodeResult>> {
-    if !self.is_probed || self.exhausted {
+  fn decode_from_reader(
+    &mut self,
+    reader: &mut dyn FormatReader,
+    complete_reads: bool,
+  ) -> Result<Option<DecodeResult>> {
+    if self.exhausted {
       return Ok(None);
     }
-
-    let reader = self
-      .format_reader
-      .as_mut()
-      .ok_or_else(|| Error::from_reason("Format reader gone"))?;
     let audio_dec = self
       .audio_decoder
       .as_mut()
@@ -767,7 +1150,7 @@ impl SymphoniaDecoder {
         }
       }
 
-      if !self.buffer.is_closed() && self.buffer.available_bytes() < self.stream_decode_threshold {
+      if !complete_reads && self.buffer.available_bytes() < self.stream_decode_threshold {
         break;
       }
 
@@ -819,7 +1202,12 @@ impl SymphoniaDecoder {
         Err(SymphoniaError::IoError(e))
           if e.kind() == ErrorKind::UnexpectedEof || e.kind() == ErrorKind::WouldBlock =>
         {
-          if !self.buffer.is_closed() {
+          if complete_reads && !self.buffer.is_closed() {
+            return Err(Error::from_reason(format!(
+              "MP4 packet extraction failed: {e}"
+            )));
+          }
+          if !complete_reads {
             break;
           }
 
@@ -856,7 +1244,10 @@ impl SymphoniaDecoder {
       channels: target_channels as u32,
     }))
   }
+}
 
+#[napi]
+impl SymphoniaDecoder {
   #[napi]
   pub fn flush(&mut self) -> Result<()> {
     self.buffer.clear();

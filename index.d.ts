@@ -38,3 +38,39 @@ export interface DecodeResult {
   sampleRate: number
   channels: number
 }
+
+export interface Mp4AacPacket {
+  data: Buffer
+  start: number
+  end: number
+}
+
+export interface Mp4AacTrack {
+  sampleRate: number
+  channels: number
+  config: Buffer
+  packets: Array<Mp4AacPacket>
+}
+
+/** Extracts compressed AAC and decode timestamps from a complete MP4/M4A buffer. */
+export declare function demuxMp4Aac(input: Buffer): Mp4AacTrack
+
+/** Opens an MP4 using a random-access callback without loading its media data. */
+export declare function openMp4Audio(length: number | null, fetch: (error: Error | null, range: [start: number, length: number]) => Promise<Buffer>, seekSeconds?: number | null): Promise<Mp4AudioReader>
+
+export declare class Mp4AudioReader {
+  get codec(): string
+  get sampleRate(): number | null
+  get channels(): number | null
+  get config(): Buffer
+  readPcm(): Promise<Buffer | null>
+  readPackets(limit: number): Promise<Array<Mp4AacPacket>>
+  close(): Promise<void>
+}
+
+export declare class PcmResampler {
+  constructor(rate: number, quality: string)
+  process(pcm: Float32Array, channels: number): Buffer
+  finish(): Buffer
+  close(): void
+}
