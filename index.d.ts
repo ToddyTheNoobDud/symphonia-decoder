@@ -89,4 +89,8 @@ export interface Mp4AudioRange {
 }
 
 /** Opens an MP4 using a random-access callback without loading its media data. */
-export declare function openMp4Audio(length: number | undefined | null, fetch: (error: Error | null, range: [start: number, length: number]) => Promise<Buffer>, seekSeconds?: number | undefined | null): Promise<Mp4AudioReader>
+export declare function openMp4Audio(
+  length: number | undefined | null,
+  fetch: (error: Error | null, range: [start: number, length: number]) => Promise<Buffer>,
+  seekSeconds?: number | undefined | null,
+): Promise<Mp4AudioReader>

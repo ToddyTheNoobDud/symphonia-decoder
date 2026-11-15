@@ -7,12 +7,9 @@ import {
 } from '@napi-rs/wasm-runtime'
 import { createContext as __emnapiCreateContext } from '@emnapi/runtime'
 
-
 export const __napiBindingTarget = 'wasm32-wasi'
 function __napiStampBindingTarget(exportsObject, target) {
-  if (
-    Object.prototype.hasOwnProperty.call(exportsObject, '__napiBindingTarget')
-  ) {
+  if (Object.prototype.hasOwnProperty.call(exportsObject, '__napiBindingTarget')) {
     if (exportsObject.__napiBindingTarget === target) {
       // Already ours: the root entry aliases the object it loaded, so a WASI
       // fallback candidate — or a `NAPI_RS_NATIVE_LIBRARY_PATH` override that
@@ -82,10 +79,7 @@ const __sharedMemory = new WebAssembly.Memory({
   shared: true,
 })
 const __asyncWorkPoolSize = 4
-const __workerPoolSize = Math.max(
-  2,
-  globalThis.navigator?.hardwareConcurrency ?? 4,
-)
+const __workerPoolSize = Math.max(2, globalThis.navigator?.hardwareConcurrency ?? 4)
 
 let __emnapiContext
 
@@ -110,11 +104,7 @@ function __captureWasiThreadManager(context) {
 
 function __getWasiThreadManager() {
   const manager =
-    __wasiThreadManager !== undefined
-      ? __wasiThreadManager
-      : __napiModule
-        ? __napiModule.PThread
-        : undefined
+    __wasiThreadManager !== undefined ? __wasiThreadManager : __napiModule ? __napiModule.PThread : undefined
   if (manager && typeof manager.terminateWorker === 'function') {
     return manager
   }
@@ -153,9 +143,7 @@ let __retainWasiRollbackForRetry = function () {}
 
 function __isThenable(value) {
   return (
-    value !== null &&
-    (typeof value === 'object' || typeof value === 'function') &&
-    typeof value.then === 'function'
+    value !== null && (typeof value === 'object' || typeof value === 'function') && typeof value.then === 'function'
   )
 }
 
@@ -176,15 +164,9 @@ function __attachCleanupErrors(error, cleanupErrors) {
   if (cleanupErrors.length === 0) {
     return error
   }
-  const cleanupError = __createCleanupError(
-    cleanupErrors,
-    'WASI binding cleanup failed',
-  )
+  const cleanupError = __createCleanupError(cleanupErrors, 'WASI binding cleanup failed')
   try {
-    if (
-      error &&
-      (typeof error === 'object' || typeof error === 'function')
-    ) {
+    if (error && (typeof error === 'object' || typeof error === 'function')) {
       if (error.cause === undefined) {
         error.cause = cleanupError
         if (error.cause === cleanupError) {
@@ -203,21 +185,14 @@ function __attachCleanupErrors(error, cleanupErrors) {
       }
     }
   } catch {}
-  const aggregate = __createCleanupError(
-    [error, cleanupError],
-    'WASI binding initialization and cleanup failed',
-  )
+  const aggregate = __createCleanupError([error, cleanupError], 'WASI binding initialization and cleanup failed')
   try {
     aggregate.cause = error
   } catch {}
   return aggregate
 }
 
-function __wrapEmnapiContextDestroyForSettlement(
-  context,
-  prepareEnvCleanup,
-  isPreparingEnvCleanup,
-) {
+function __wrapEmnapiContextDestroyForSettlement(context, prepareEnvCleanup, isPreparingEnvCleanup) {
   let destroy
   try {
     destroy = context.destroy
@@ -326,7 +301,7 @@ function __reportUnreachedWasmEnvSettlements() {
     const consoleHost = globalThis.console
     if (consoleHost && typeof consoleHost.error === 'function') {
       consoleHost.error(
-        "napi-rs: the wasm environment is being destroyed with " +
+        'napi-rs: the wasm environment is being destroyed with ' +
           queued +
           " queued promise settlement(s). Context.destroy() discards them, so those promises never settle. Dispose with binding[Symbol.for('napi.rs.wasi.dispose')]() instead: only it yields the event-loop turns the settlements need.",
       )
@@ -483,10 +458,7 @@ function __armWasmRuntimePollStallBackup(pace) {
   try {
     handle = setTimer(() => {
       const settleTurn = pace.settleTurn
-      if (
-        !settleTurn ||
-        pace.turnTimerDueAt > dueAt - __WASM_RUNTIME_WORK_POLL_STALL_MS
-      ) {
+      if (!settleTurn || pace.turnTimerDueAt > dueAt - __WASM_RUNTIME_WORK_POLL_STALL_MS) {
         // No turn is parked, or the parked one's timer came due too close to
         // this backup to call it dropped — it may still arrive, and the turn
         // that armed it armed a backup due a whole window after *that*.
@@ -729,9 +701,7 @@ function __drainWasmEnvCleanup() {
       return
     }
   }
-  const limit = observable
-    ? __WASM_ENV_CLEANUP_DRAIN_TURNS
-    : __WASM_ENV_CLEANUP_BLIND_DRAIN_TURNS
+  const limit = observable ? __WASM_ENV_CLEANUP_DRAIN_TURNS : __WASM_ENV_CLEANUP_BLIND_DRAIN_TURNS
   const drainPromise = (async () => {
     let queued = 0
     for (let turn = 0; turn < limit; turn++) {
@@ -1063,15 +1033,10 @@ function __terminateWasiWorkers() {
 
   const finish = () => {
     if (cleanupErrors.length > 0) {
-      throw __createCleanupError(
-        cleanupErrors,
-        'Failed to terminate WASI workers',
-      )
+      throw __createCleanupError(cleanupErrors, 'Failed to terminate WASI workers')
     }
   }
-  return pending.length > 0
-    ? __keepEventLoopAliveUntil(Promise.all(pending)).then(finish)
-    : finish()
+  return pending.length > 0 ? __keepEventLoopAliveUntil(Promise.all(pending)).then(finish) : finish()
 }
 
 function __finishWasiDisposal() {
@@ -1118,9 +1083,7 @@ function __startWasiDisposal() {
   // the pool threads removes what would have reported the work finished.
   const asyncWorkResult = __drainWasiAsyncWork()
   if (__isThenable(asyncWorkResult)) {
-    return Promise.resolve(asyncWorkResult).then(
-      __cleanUpWasmEnvForWasiDisposal,
-    )
+    return Promise.resolve(asyncWorkResult).then(__cleanUpWasmEnvForWasiDisposal)
   }
   return __cleanUpWasmEnvForWasiDisposal()
 }
@@ -1324,8 +1287,7 @@ function __rollbackWasiInitialization() {
   // `__rollbackWasmEnvForWasiInitialization` makes for the settlement drain, so
   // the context stays reclaimable by a retry or by this flavor's own
   // last-resort teardown.
-  const __retainAfterAsyncWorkDrainFailure = (cleanupError) =>
-    __retainFailedWasiRollback([cleanupError])
+  const __retainAfterAsyncWorkDrainFailure = (cleanupError) => __retainFailedWasiRollback([cleanupError])
   let asyncWorkResult
   try {
     asyncWorkResult = __drainWasiAsyncWork()
@@ -1381,7 +1343,7 @@ try {
     __isPreparingWasmEnvCleanup,
   )
   __emnapiContext.suppressDestroy()
-  
+
   ;({
     instance: __napiInstance,
     module: __wasiModule,
@@ -1390,11 +1352,7 @@ try {
     context: __emnapiContext,
     asyncWorkPoolSize: __asyncWorkPoolSize,
     reuseWorker: { size: __asyncWorkPoolSize + __workerPoolSize },
-    plugins: [
-      __captureWasiThreadManager,
-      __emnapiAsyncWorkPlugin,
-      __emnapiTSFNPlugin,
-    ],
+    plugins: [__captureWasiThreadManager, __emnapiAsyncWorkPlugin, __emnapiTSFNPlugin],
     wasi: __wasi,
     onCreateWorker() {
       const worker = new Worker(new URL('./wasi-worker-browser.mjs', import.meta.url), {
@@ -1402,7 +1360,6 @@ try {
       })
       __wasiWorkers.add(worker)
       __shareWasiAddonCrashFlag(worker)
-
 
       return worker
     },

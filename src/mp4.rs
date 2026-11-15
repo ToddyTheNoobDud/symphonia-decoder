@@ -105,12 +105,13 @@ pub(crate) fn track_layout(
     video_types.clear();
   }
   let mut ranges = Vec::new();
-  if audio_tracks == 1 && !video_types.is_empty() {
-    if let Some(mdat) = find_atom(source, 0, movie.start, b"mdat")? {
-      if mdat.end == movie.start {
-        ranges = single_sample_chunks(source, audio_media.unwrap(), mdat)?;
-      }
-    }
+  if audio_tracks == 1
+    && !video_types.is_empty()
+    && let Some(media) = audio_media
+    && let Some(mdat) = find_atom(source, 0, movie.start, b"mdat")?
+    && mdat.end == movie.start
+  {
+    ranges = single_sample_chunks(source, media, mdat)?;
   }
   Ok((video_types, ranges))
 }
