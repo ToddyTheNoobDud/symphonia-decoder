@@ -30,7 +30,10 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Time;
 use symphonia_adapter_libopus::OpusDecoder;
 
+mod mp4;
 mod pcm;
+
+use mp4::Mp4AudioRange;
 
 const SAMPLE_MAX: f32 = 32767.0;
 const INITIAL_BUFFER_CAPACITY: usize = 1024 * 1024;
@@ -67,6 +70,7 @@ struct Mp4RangeSource {
   fetch: FetchMp4Range,
   length: Option<u64>,
   position: u64,
+  video_track_types: Vec<u64>,
 }
 
 impl Read for Mp4RangeSource {
@@ -94,7 +98,16 @@ impl Read for Mp4RangeSource {
       ));
     }
     output[..bytes.len()].copy_from_slice(&bytes);
-    self.position += bytes.len() as u64;
+    let end = self.position + bytes.len() as u64;
+    for &offset in &self.video_track_types {
+      let start = offset.max(self.position);
+      let stop = (offset + 4).min(end);
+      if start < stop {
+        output[(start - self.position) as usize..(stop - self.position) as usize]
+          .copy_from_slice(&b"free"[(start - offset) as usize..(stop - offset) as usize]);
+      }
+    }
+    self.position = end;
     Ok(bytes.len())
   }
 }
@@ -137,6 +150,7 @@ pub struct Mp4AudioReader {
   sample_rate: Option<u32>,
   channels: Option<u32>,
   config: Vec<u8>,
+  audio_ranges: Vec<Mp4AudioRange>,
 }
 
 /// Opens an MP4 using a random-access callback without loading its media data.
@@ -155,14 +169,19 @@ pub async fn open_mp4_audio(
     return Err(Error::from_reason("Invalid MP4 byte length"));
   }
   spawn_blocking(move || {
-    let source = MediaSourceStream::new(
-      Box::new(Mp4RangeSource {
-        fetch,
-        length: length.map(|length| length as u64),
-        position: 0,
-      }),
-      Default::default(),
-    );
+    let mut source = Mp4RangeSource {
+      fetch,
+      length: length.map(|length| length as u64),
+      position: 0,
+      video_track_types: Vec::new(),
+    };
+    let mut audio_ranges = Vec::new();
+    if let Some(length) = source.length {
+      (source.video_track_types, audio_ranges) = mp4::track_layout(&mut source, length)
+        .map_err(|error| Error::from_reason(format!("MP4 track discovery failed: {error}")))?;
+      source.position = 0;
+    }
+    let source = MediaSourceStream::new(Box::new(source), Default::default());
     let mut reader = probe_mp4(source)?;
     let (track, parameters, codec) = reader
       .tracks()
@@ -225,6 +244,7 @@ pub async fn open_mp4_audio(
       sample_rate,
       channels,
       config,
+      audio_ranges,
     })
   })
   .await
@@ -251,6 +271,11 @@ impl Mp4AudioReader {
   #[napi(getter)]
   pub fn config(&self) -> Buffer {
     self.config.clone().into()
+  }
+
+  #[napi(getter)]
+  pub fn audio_ranges(&self) -> Vec<Mp4AudioRange> {
+    self.audio_ranges.clone()
   }
 
   #[napi]

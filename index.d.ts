@@ -14,6 +14,7 @@ export declare class Mp4AudioReader {
   get sampleRate(): number | null
   get channels(): number | null
   get config(): Buffer
+  get audioRanges(): Array<Mp4AudioRange>
   readPackets(limit: number): Promise<Array<Mp4AacPacket>>
   /** Decodes an ALAC track to 48 kHz stereo PCM using the same resampler as other formats. */
   readPcm(): Promise<Buffer | null>
@@ -73,6 +74,11 @@ export interface Mp4AacPacket {
   data: Buffer
   start: number
   end: number
+}
+
+export interface Mp4AudioRange {
+  start: number
+  length: number
 }
 
 export interface Mp4AacTrack {

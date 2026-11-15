@@ -39,3 +39,6 @@ export interface DecodeResult {
   sampleRate: number
   channels: number
 }
+
+/** The WASI flavor this loader instantiates. */
+export declare const __napiBindingTarget: 'wasm32-wasi'
