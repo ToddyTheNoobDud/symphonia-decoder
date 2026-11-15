@@ -76,16 +76,16 @@ export interface Mp4AacPacket {
   end: number
 }
 
-export interface Mp4AudioRange {
-  start: number
-  length: number
-}
-
 export interface Mp4AacTrack {
   sampleRate: number
   channels: number
   config: Buffer
   packets: Array<Mp4AacPacket>
+}
+
+export interface Mp4AudioRange {
+  start: number
+  length: number
 }
 
 /** Opens an MP4 using a random-access callback without loading its media data. */
