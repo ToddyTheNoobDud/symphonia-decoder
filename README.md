@@ -106,5 +106,14 @@ corepack yarn build
 corepack yarn test
 ```
 
+If a Windows shell corrupts a non-ASCII path when launching a Yarn script,
+call the same tools directly from PowerShell with the build toolchain loaded.
+
+```powershell
+$target = Join-Path ([IO.Path]::GetTempPath()) 'symphonia-decoder-build'
+node .\node_modules\@napi-rs\cli\dist\cli.js build --platform --release --target-dir $target
+node .\node_modules\ava\entrypoints\cli.js
+```
+
 Review and commit the changes with `1.3.0` as the commit message. Push that
 commit to `main` to run the platform builds and tests before CI publishes.
